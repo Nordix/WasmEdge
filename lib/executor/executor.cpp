@@ -85,8 +85,9 @@ Executor::invoke(const Runtime::Instance::FunctionInstance *FuncInst,
   const auto &FuncType = FuncInst->getFuncType();
   const auto &PTypes = FuncType.getParamTypes();
   const auto &RTypes = FuncType.getReturnTypes();
-  if (!matchTypes(*FuncInst->getModule(), ParamTypes, *FuncInst->getModule(),
-                  PTypes)) {
+  if (!AST::TypeMatcher::matchTypes(
+          FuncInst->getModule()->getTypeList(), ParamTypes,
+          FuncInst->getModule()->getTypeList(), PTypes)) {
     spdlog::error(ErrCode::Value::FuncSigMismatch);
     spdlog::error(ErrInfo::InfoMismatch(
         PTypes, RTypes, std::vector(ParamTypes.begin(), ParamTypes.end()),
@@ -115,8 +116,14 @@ Executor::invoke(const Runtime::Instance::FunctionInstance *FuncInst,
   // Get return values.
   std::vector<std::pair<ValVariant, ValType>> Returns(RTypes.size());
   for (uint32_t I = 0; I < RTypes.size(); ++I) {
-    Returns[RTypes.size() - I - 1] =
-        std::make_pair(StackMgr.pop(), RTypes[RTypes.size() - I - 1]);
+    auto Val = StackMgr.pop();
+    if (RTypes[RTypes.size() - I - 1].isRefType()) {
+      Returns[RTypes.size() - I - 1] =
+          std::make_pair(Val, Val.get<RefVariant>().getType());
+    } else {
+      Returns[RTypes.size() - I - 1] =
+          std::make_pair(Val, RTypes[RTypes.size() - I - 1]);
+    }
   }
 
   // After execution, the value stack size should be 0.

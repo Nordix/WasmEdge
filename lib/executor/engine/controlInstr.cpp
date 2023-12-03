@@ -89,83 +89,10 @@ Expect<void> Executor::runBrTableOp(Runtime::StackManager &StackMgr,
                        LabelTable[LabelTableSize].PCOffset, PC);
 }
 
-bool Executor::canCast(Runtime::StackManager &StackMgr, const HeapType &HType,
-                       bool AllowNull) const {
-  const auto &Ref = StackMgr.getTop().get<RefVariant>();
-  if (Ref.isNull()) {
-    return AllowNull;
-  }
-  spdlog::error("cast cast to");
-  spdlog::error(HType);
-  switch (HType.getHTypeCode()) {
-  case HeapTypeCode::Func:
-    return true;
-  case HeapTypeCode::NoFunc:
-    return false;
-  case HeapTypeCode::Extern:
-    return true;
-  case HeapTypeCode::NoExtern:
-    return false;
-  case HeapTypeCode::Any:
-  case HeapTypeCode::Eq:
-    return true;
-  case HeapTypeCode::None:
-    // The reference is non-null. Must not be none
-    return false;
-  case HeapTypeCode::I31: {
-    const auto *HeapValue = Ref.asPtr<Runtime::Instance::HeapInstance>();
-    return HeapValue->isI31();
-  }
-  case HeapTypeCode::Struct: {
-    const auto *HeapValue = Ref.asPtr<Runtime::Instance::HeapInstance>();
-    return HeapValue->isStruct();
-  }
-
-  case HeapTypeCode::Array: {
-    const auto *HeapValue = Ref.asPtr<Runtime::Instance::HeapInstance>();
-    return HeapValue->isArray();
-  }
-
-  case HeapTypeCode::Defined:
-    spdlog::error("cast on defined type");
-    const auto *HeapValue = Ref.asPtr<Runtime::Instance::HeapInstance>();
-    const auto *ModInst = StackMgr.getModule();
-    if (ModInst != HeapValue->getModInst()) {
-      // Only type defined in the same module can be casted
-      return false;
-    }
-    const auto TypeIdx = HeapValue->getTypeIdx();
-    const auto TargetTypeIdx = HType.getDefinedTypeIdx();
-    spdlog::error(TypeIdx);
-    spdlog::error(TargetTypeIdx);
-    if (TypeIdx == TargetTypeIdx) {
-      return true;
-    }
-    auto CurTypeIdx = TypeIdx;
-    spdlog::error(ModInst->Types[0].isType<AST::StructType>());
-    spdlog::error(ModInst->Types[1].asStructType().getContent().size());
-    while (!ModInst->Types[CurTypeIdx].getParentTypeIdx().empty()) {
-      assuming(ModInst->Types[CurTypeIdx].getParentTypeIdx().size() == 1);
-      CurTypeIdx = ModInst->Types[CurTypeIdx].getParentTypeIdx()[0];
-      if (CurTypeIdx == TargetTypeIdx) {
-        spdlog::error("find parent index");
-        return true;
-      }
-    }
-    spdlog::error("cannon find parent index");
-    return false;
-  }
-}
-
-Expect<void> Executor::runBrCastOp(Runtime::StackManager &StackMgr,
-                                   const AST::Instruction &Instr,
-                                   AST::InstrView::iterator &PC, bool AllowNull,
-                                   bool IsFailed) noexcept {
-  spdlog::error(OpCodeStr[Instr.getOpCode()]);
-  spdlog::error(Instr.getJumpHeapType());
-  if (IsFailed == !canCast(StackMgr, Instr.getJumpHeapType(), AllowNull)) {
-    return runBrOp(StackMgr, Instr, PC);
-  }
+Expect<void> Executor::runBrCastOp(Runtime::StackManager &,
+                                   const AST::Instruction &,
+                                   AST::InstrView::iterator &, bool,
+                                   bool) noexcept {
   return {};
 }
 
@@ -185,8 +112,7 @@ Expect<void> Executor::runCallOp(Runtime::StackManager &StackMgr,
                                  AST::InstrView::iterator &PC,
                                  bool IsTailCall) noexcept {
   // Get Function address.
-  const auto *ModInst = StackMgr.getModule();
-  const auto *FuncInst = *ModInst->getFunc(Instr.getTargetIndex());
+  const auto *FuncInst = getFuncInstByIdx(StackMgr, Instr.getTargetIndex());
   if (auto Res = enterFunction(StackMgr, *FuncInst, PC + 1, IsTailCall); !Res) {
     return Unexpect(Res);
   } else {
@@ -227,7 +153,9 @@ Expect<void> Executor::runCallIndirectOp(Runtime::StackManager &StackMgr,
 
   // Get function type at index x.
   const auto *ModInst = StackMgr.getModule();
-  const auto *TargetFuncType = *ModInst->getFuncType(Instr.getTargetIndex());
+  const auto &TargetFuncType = (*ModInst->getType(Instr.getTargetIndex()))
+                                   ->getCompositeType()
+                                   .getFuncType();
 
   // Pop the value i32.const i from the Stack.
   uint32_t Idx = StackMgr.pop().get<uint32_t>();
@@ -254,16 +182,18 @@ Expect<void> Executor::runCallIndirectOp(Runtime::StackManager &StackMgr,
   // Check function type.
   const auto *FuncInst = retrieveFuncRef(Ref);
   const auto &FuncType = FuncInst->getFuncType();
-  if (!matchTypes(*ModInst, TargetFuncType->getParamTypes(),
-                  *FuncInst->getModule(), FuncType.getParamTypes()) ||
-      !matchTypes(*ModInst, TargetFuncType->getReturnTypes(),
-                  *FuncInst->getModule(), FuncType.getReturnTypes())) {
+  if (!AST::TypeMatcher::matchTypes(
+          ModInst->getTypeList(), TargetFuncType.getParamTypes(),
+          FuncInst->getModule()->getTypeList(), FuncType.getParamTypes()) ||
+      !AST::TypeMatcher::matchTypes(
+          ModInst->getTypeList(), TargetFuncType.getReturnTypes(),
+          FuncInst->getModule()->getTypeList(), FuncType.getReturnTypes())) {
     spdlog::error(ErrCode::Value::IndirectCallTypeMismatch);
     spdlog::error(ErrInfo::InfoInstruction(Instr.getOpCode(), Instr.getOffset(),
                                            {Idx},
                                            {ValTypeFromType<uint32_t>()}));
     spdlog::error(ErrInfo::InfoMismatch(
-        TargetFuncType->getParamTypes(), TargetFuncType->getReturnTypes(),
+        TargetFuncType.getParamTypes(), TargetFuncType.getReturnTypes(),
         FuncType.getParamTypes(), FuncType.getReturnTypes()));
     return Unexpect(ErrCode::Value::IndirectCallTypeMismatch);
   }
